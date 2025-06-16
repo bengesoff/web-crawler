@@ -2,35 +2,43 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
 
-	"github.com/bengesoff/web-crawler/links_fetcher"
+	"github.com/bengesoff/web-crawler/walker"
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
 	if len(os.Args) < 2 {
-		log.Fatal("Missing required argument: URL to crawl")
+		logger.Error("Missing required argument: URL to crawl")
+		os.Exit(1)
 	}
 
 	rootUrl, err := url.Parse(os.Args[1])
 	if err != nil {
-		log.Fatalf("Failed to parse url: %v", err)
+		logger.Error("Failed to parse url", slog.String("err", err.Error()))
+		os.Exit(1)
 	}
 
 	client := &http.Client{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	links, err := links_fetcher.FetchAndGetLinks(ctx, client, rootUrl)
+
+	linkWalker := walker.NewLinkWalker(logger, rootUrl, client)
+	err = linkWalker.Walk(ctx, rootUrl)
 	if err != nil {
-		log.Fatalf("Failed to fetch links: %v", err)
+		logger.Error("Failed to walk", slog.String("err", err.Error()))
+		os.Exit(1)
 	}
 
-	for linkedUrl := range links {
-		log.Printf("Found link: %s\n", linkedUrl)
+	for sitemap := range linkWalker.Pages() {
+		fmt.Print(sitemap.String())
 	}
 }

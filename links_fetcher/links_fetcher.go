@@ -2,6 +2,7 @@ package links_fetcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"mime"
@@ -10,6 +11,10 @@ import (
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
+)
+
+var (
+	ErrUnsupportedMediaType = errors.New("unsupported media type")
 )
 
 type HttpClient interface {
@@ -45,7 +50,7 @@ func GetAndParseHtml(ctx context.Context, client HttpClient, rootUrl *url.URL) (
 		return nil, fmt.Errorf("error parsing content type: %w", err)
 	}
 	if mediaType != "text/html" {
-		return nil, fmt.Errorf("unexpected content type: %s", mediaType)
+		return nil, fmt.Errorf("unexpected content type %s: %w", mediaType, ErrUnsupportedMediaType)
 	}
 
 	document, err := html.Parse(response.Body)
