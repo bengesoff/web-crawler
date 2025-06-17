@@ -35,7 +35,12 @@ func (w *LinkWalker) Walk(ctx context.Context, walkUrl *url.URL) error {
 	results := make(chan *PageLinks, 10)
 	done := make(chan struct{})
 
-	// TODO: cache to avoid rewalking?
+	// Avoids requesting a page multiple times if it is linked from multiple pages.
+	// We could request it multiple times if it errors, or if it is linked from multiple pages and none of the fetches
+	// have completed yet.
+	seen := map[string]struct{}{
+		stripUrl(walkUrl).String(): {},
+	}
 
 	// A goroutine to process the results and kick off new fetch jobs.
 	// It mutates the state (`w.pages`), but it's the only goroutine that does so until the `done` channel closes, so
@@ -54,8 +59,13 @@ func (w *LinkWalker) Walk(ctx context.Context, walkUrl *url.URL) error {
 
 					for _, link := range pageLinks.Links {
 						if link.Hostname() == w.rootUrl.Hostname() {
-							if _, ok := w.pages[stripUrl(link).String()]; !ok {
+							linkKey := stripUrl(link).String()
+
+							// skip queuing the link if we've already seen it
+							if _, ok := seen[linkKey]; !ok {
+								seen[linkKey] = struct{}{}
 								workInProgress++
+
 								select {
 								case linksToFetch <- link:
 								default:
