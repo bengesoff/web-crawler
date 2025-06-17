@@ -31,40 +31,86 @@ func NewLinkWalker(logger *slog.Logger, rootUrl *url.URL, httpClient links_fetch
 }
 
 func (w *LinkWalker) Walk(ctx context.Context, walkUrl *url.URL) error {
-	w.logger.InfoContext(ctx, "Visiting page", slog.String("walk_url", walkUrl.String()))
+	linksToFetch := make(chan *url.URL, 100000)
+	results := make(chan *PageLinks, 10)
+	done := make(chan struct{})
 
 	// TODO: cache to avoid rewalking?
-	links, err := links_fetcher.FetchAndGetLinks(ctx, w.httpClient, walkUrl)
-	if err != nil {
-		// don't attempt to walk non-HTML pages
-		if errors.Is(err, links_fetcher.ErrUnsupportedMediaType) {
-			w.logger.DebugContext(ctx, "Unsupported media type", slog.String("walk_url", walkUrl.String()))
-			return nil
-		}
-		w.logger.ErrorContext(ctx, "Failed to fetch links", slog.String("walk_url", walkUrl.String()))
-		// TODO: could also implement retries
-		return nil
-	}
 
-	pageLinks := &PageLinks{
-		Url:   walkUrl,
-		Links: slices.Collect(links),
-	}
+	// A goroutine to process the results and kick off new fetch jobs.
+	// It mutates the state (`w.pages`), but it's the only goroutine that does so until the `done` channel closes, so
+	// concurrent access is avoided, and we don't need a mutex.
+	go func() {
+		defer close(done)
 
-	w.pages[stripUrl(walkUrl).String()] = pageLinks
+		workInProgress := 1
+		for {
+			select {
+			case pageLinks := <-results:
+				workInProgress--
 
-	for _, link := range pageLinks.Links {
-		if link.Hostname() == w.rootUrl.Hostname() {
-			if _, ok := w.pages[stripUrl(link).String()]; !ok {
-				err := w.Walk(ctx, link)
-				if err != nil {
-					return err
+				if pageLinks.Error == nil {
+					w.pages[stripUrl(pageLinks.Url).String()] = pageLinks
+
+					for _, link := range pageLinks.Links {
+						if link.Hostname() == w.rootUrl.Hostname() {
+							if _, ok := w.pages[stripUrl(link).String()]; !ok {
+								workInProgress++
+								select {
+								case linksToFetch <- link:
+								default:
+									w.logger.ErrorContext(ctx, "Failed to send URL to channel for fetching", slog.String("walk_url", link.String()))
+									workInProgress--
+								}
+							}
+						}
+					}
 				}
+
+				if workInProgress == 0 {
+					return
+				}
+			case <-ctx.Done():
+				return
 			}
 		}
+	}()
+
+	for range 50 {
+		go worker(ctx, w.logger, w.httpClient, linksToFetch, results)
 	}
 
+	linksToFetch <- walkUrl
+
+	<-done
+	close(linksToFetch)
 	return nil
+}
+
+// worker iterates over the `linksToFetch` channel and produces the links it finds to the `results` channel
+func worker(ctx context.Context, logger *slog.Logger, httpClient links_fetcher.HttpClient, linksToFetch <-chan *url.URL, results chan<- *PageLinks) {
+	for pageUrl := range linksToFetch {
+		logger.InfoContext(ctx, "Visiting page", slog.String("walk_url", pageUrl.String()))
+
+		links, err := links_fetcher.FetchAndGetLinks(ctx, httpClient, pageUrl)
+		if err != nil {
+			results <- &PageLinks{Url: pageUrl, Error: err}
+			// don't attempt to walk non-HTML pages
+			if errors.Is(err, links_fetcher.ErrUnsupportedMediaType) {
+				logger.InfoContext(ctx, "Unsupported media type", slog.String("walk_url", pageUrl.String()))
+				continue
+			}
+			logger.ErrorContext(ctx, "Failed to fetch links", slog.String("walk_url", pageUrl.String()))
+			// TODO: could also implement retries
+			continue
+		}
+
+		pageLinks := &PageLinks{
+			Url:   pageUrl,
+			Links: slices.Collect(links),
+		}
+		results <- pageLinks
+	}
 }
 
 func (w *LinkWalker) Pages() iter.Seq[*PageLinks] {
@@ -74,9 +120,13 @@ func (w *LinkWalker) Pages() iter.Seq[*PageLinks] {
 type PageLinks struct {
 	Url   *url.URL
 	Links []*url.URL
+	Error error
 }
 
 func (s *PageLinks) String() string {
+	if s.Error != nil {
+		return fmt.Sprintf("Error fetching links for %s: %s\n", s.Url, s.Error.Error())
+	}
 	builder := strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Links from %s:\n", s.Url.String()))
 	for _, link := range s.Links {
