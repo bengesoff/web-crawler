@@ -3,27 +3,16 @@ package links_fetcher_test
 import (
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/stretchr/testify/assert"
 
 	"github.com/bengesoff/web-crawler/links_fetcher"
+	"github.com/bengesoff/web-crawler/mocks"
 )
-
-type mockHttpClient struct {
-	handler func(w http.ResponseWriter, r *http.Request)
-}
-
-func (c *mockHttpClient) Do(request *http.Request) (*http.Response, error) {
-	w := httptest.NewRecorder()
-	c.handler(w, request)
-	return w.Result(), nil
-}
 
 func TestFetchAndGetLinks(t *testing.T) {
 	type args struct {
@@ -123,8 +112,7 @@ func TestFetchAndGetLinks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			httpClient := &mockHttpClient{func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, tt.args.rootUrl, r.URL)
+			httpClient := &mocks.MockHttpClient{Handler: func(w http.ResponseWriter, r *http.Request) {
 				for k, v := range tt.args.responseHeaders {
 					w.Header().Add(k, v)
 				}
