@@ -10,6 +10,9 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/bengesoff/web-crawler/links_fetcher"
 )
@@ -19,6 +22,7 @@ type LinkWalker struct {
 	rootUrl    *url.URL
 	httpClient links_fetcher.HttpClient
 	pages      map[string]*PageLinks
+	limiter    *rate.Limiter
 }
 
 func NewLinkWalker(logger *slog.Logger, rootUrl *url.URL, httpClient links_fetcher.HttpClient) *LinkWalker {
@@ -27,6 +31,7 @@ func NewLinkWalker(logger *slog.Logger, rootUrl *url.URL, httpClient links_fetch
 		rootUrl:    rootUrl,
 		httpClient: httpClient,
 		pages:      map[string]*PageLinks{},
+		limiter:    rate.NewLimiter(rate.Every(50*time.Millisecond), 1),
 	}
 }
 
@@ -87,7 +92,7 @@ func (w *LinkWalker) Walk(ctx context.Context, walkUrl *url.URL) error {
 	}()
 
 	for range 50 {
-		go worker(ctx, w.logger, w.httpClient, linksToFetch, results)
+		go worker(ctx, w.logger, w.httpClient, w.limiter, linksToFetch, results)
 	}
 
 	linksToFetch <- walkUrl
@@ -98,9 +103,21 @@ func (w *LinkWalker) Walk(ctx context.Context, walkUrl *url.URL) error {
 }
 
 // worker iterates over the `linksToFetch` channel and produces the links it finds to the `results` channel
-func worker(ctx context.Context, logger *slog.Logger, httpClient links_fetcher.HttpClient, linksToFetch <-chan *url.URL, results chan<- *PageLinks) {
+func worker(
+	ctx context.Context,
+	logger *slog.Logger,
+	httpClient links_fetcher.HttpClient,
+	limiter *rate.Limiter,
+	linksToFetch <-chan *url.URL,
+	results chan<- *PageLinks,
+) {
 	for pageUrl := range linksToFetch {
 		logger.InfoContext(ctx, "Visiting page", slog.String("walk_url", pageUrl.String()))
+
+		if err := limiter.Wait(ctx); err != nil {
+			results <- &PageLinks{Url: pageUrl, Error: err}
+			continue
+		}
 
 		links, err := links_fetcher.FetchAndGetLinks(ctx, httpClient, pageUrl)
 		if err != nil {
